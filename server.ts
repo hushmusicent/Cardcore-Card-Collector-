@@ -27,7 +27,7 @@ interface GeminiPriceResult {
   note?: string;
 }
 
-const GEMINI_MODEL = 'gemini-4-hydrogen';
+const GEMINI_MODEL = 'gemini-2.5-flash';
 const ALLOWED_CATEGORIES: ReadonlySet<string> = new Set(['Comics', 'Cards', 'Toys']);
 const ALLOWED_MIME_TYPES: ReadonlySet<string> = new Set([
   'image/jpeg',
@@ -211,15 +211,43 @@ async function startServer() {
         });
       }
 
-      const resp = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: {
-          parts: [...imageParts, { text: prompt }],
-        },
-        config: {
-          tools: [{ googleSearch: {} }],
-        },
-      });
+      // The free key only allows so many checks per minute. If Gemini says
+      // rate limit, wait and try again inside the server (15s, then 30s)
+      // instead of failing straight away — one tap, no hammering retry.
+      let resp: Awaited<ReturnType<typeof ai.models.generateContent>> | undefined;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          resp = await ai.models.generateContent({
+            model: GEMINI_MODEL,
+            contents: {
+              parts: [...imageParts, { text: prompt }],
+            },
+            config: {
+              tools: [{ googleSearch: {} }],
+            },
+          });
+          break;
+        } catch (retryErr: unknown) {
+          const retryStatus =
+            typeof (retryErr as { status?: unknown })?.status === 'number'
+              ? (retryErr as { status: number }).status
+              : 0;
+          const retryMsg = retryErr instanceof Error ? retryErr.message : '';
+          const rateLimited =
+            retryStatus === 429 || retryMsg.includes('RESOURCE_EXHAUSTED');
+          if (!rateLimited || attempt === 2) throw retryErr;
+          await new Promise((resolve) =>
+            setTimeout(resolve, attempt === 0 ? 15000 : 30000),
+          );
+        }
+      }
+      if (!resp) {
+        res.status(429).json({
+          error:
+            'Gemini’s free price-check limit is reached right now. Give it a minute and try again.',
+        });
+        return;
+      }
 
       const parsed = parseGeminiPriceJson(extractResponseText(resp));
       if (!parsed) {
@@ -271,7 +299,8 @@ async function startServer() {
       }
       if (safeStatus === 429 || rawMessage.includes('RESOURCE_EXHAUSTED')) {
         res.status(429).json({
-          error: 'Gemini API rate limit reached. Please wait a moment and try again.',
+          error:
+            'Gemini’s free price-check limit is reached right now — it retried twice already. Give it a few minutes and try once more; if it still fails later, the day’s free checks are used up and it works again tomorrow. You can still type the sold prices in below, or use Lens / CollX.',
         });
         return;
       }
