@@ -6,6 +6,12 @@ import {defineConfig} from 'vite';
 
 export default defineConfig(() => {
   return {
+    // Makes the AI Studio-injected GEMINI_API_KEY (from Secrets) available
+    // to the browser bundle as process.env.GEMINI_API_KEY. No real key is
+    // ever written in this file or in the app code.
+    define: {
+      'process.env.GEMINI_API_KEY': JSON.stringify(process.env.GEMINI_API_KEY ?? ''),
+    },
     plugins: [
       react(),
       tailwindcss(),

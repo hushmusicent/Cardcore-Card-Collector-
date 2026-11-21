@@ -1,3 +1,4 @@
+import { GoogleGenAI } from '@google/genai';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownRight,
@@ -69,7 +70,7 @@ interface MarketplaceLink {
 }
 
 const STORAGE_KEY = 'cardcore_collectors_vault_v1';
-const BUILD_VERSION = 'v2026.11.20.5';
+const BUILD_VERSION = 'v2026.11.20.6';
 
 const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
   Comics: [
@@ -434,6 +435,84 @@ function loadStoredItems(): CollectibleItem[] {
   return createSampleItems();
 }
 
+// --- Automatic identify & price (Gemini vision + Google Search) ---
+// AI Studio injects GEMINI_API_KEY from the user's Secrets at build time via
+// the `define` in vite.config.ts. The key is read here (and from
+// VITE_GEMINI_API_KEY as a fallback) so the app never hardcodes a secret.
+// It is read inside try/catch because `process` does not exist in the
+// browser bundle — the vite define replaces the process.env read with the
+// injected key string at build time, and the catch covers a build where the
+// define did not apply.
+function readGeminiKey(): string {
+  try {
+    const viteKey = (import.meta as any).env?.VITE_GEMINI_API_KEY as string | undefined;
+    if (viteKey) return String(viteKey);
+  } catch {
+    // import.meta.env is not available outside a Vite build — ignore.
+  }
+  try {
+    // Replaced at build time by vite.config.ts define with the injected key.
+    const injected = (process as any).env.GEMINI_API_KEY as string | undefined;
+    if (injected) return String(injected);
+  } catch {
+    // `process` is not defined in the browser without the define — ignore.
+  }
+  return '';
+}
+
+const GEMINI_KEY = readGeminiKey();
+const GEMINI_MODEL = 'gemini-2.5-flash';
+
+interface GeminiPriceRow {
+  site: string;
+  value: number;
+  url?: string;
+}
+
+interface GeminiPriceResult {
+  title?: string;
+  details?: string;
+  prices?: GeminiPriceRow[];
+  low?: number;
+  high?: number;
+  average?: number;
+  confidence?: string;
+  note?: string;
+}
+
+function normalizeSiteName(name: string): string {
+  return name.toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+function extractResponseText(resp: unknown): string {
+  if (!resp || typeof resp !== 'object') return '';
+  const direct = (resp as { text?: unknown }).text;
+  if (typeof direct === 'string' && direct.trim()) return direct;
+  const candidates = (resp as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> })
+    .candidates ?? [];
+  return candidates
+    .flatMap((c) => c.content?.parts ?? [])
+    .map((part) => (typeof part.text === 'string' ? part.text : ''))
+    .join('');
+}
+
+function parseGeminiPriceJson(raw: string): GeminiPriceResult | null {
+  if (!raw) return null;
+  let cleaned = raw.trim();
+  const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
+  if (fence?.[1]) cleaned = fence[1];
+  const start = cleaned.indexOf('{');
+  const end = cleaned.lastIndexOf('}');
+  if (start >= 0 && end > start) cleaned = cleaned.slice(start, end + 1);
+  try {
+    const parsed = JSON.parse(cleaned) as GeminiPriceResult;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    return parsed;
+  } catch {
+    return null;
+  }
+}
+
 export default function App() {
   const [items, setItems] = useState<CollectibleItem[]>(() => loadStoredItems());
   const [activeTab, setActiveTab] = useState<TabFilter>('All');
@@ -471,6 +550,9 @@ export default function App() {
   const [snapPhoto, setSnapPhoto] = useState('');
   const [snapPrices, setSnapPrices] = useState<Record<string, string>>({});
   const [snapError, setSnapError] = useState('');
+  const [snapChecking, setSnapChecking] = useState(false);
+  const [snapAutoNote, setSnapAutoNote] = useState('');
+  const snapCheckRunRef = useRef(0);
   const snapInputRef = useRef<HTMLInputElement | null>(null);
 
   // Live low / high / average from the sold prices typed in Snap & Price
@@ -683,13 +765,107 @@ export default function App() {
     }
   };
 
+  // Identifies the snapped item with Gemini vision, then uses Gemini with
+  // Google Search grounding to find RECENT SOLD prices on the sites for this
+  // category and fills the title + per-site price rows in automatically.
+  // The user never searches — they only check what it filled in. Missing
+  // key or failed call never crashes: it shows why and manual entry keeps
+  // working exactly as before.
+  const runAutoPriceCheck = async (dataUrl: string, category: Category) => {
+    const runId = ++snapCheckRunRef.current;
+    if (!GEMINI_KEY) {
+      setSnapError(
+        'Automatic price check needs a Gemini key — add GEMINI_API_KEY in AI Studio → Secrets, then rebuild. You can still type the sold prices in below, or use Lens / CollX.',
+      );
+      return;
+    }
+    setSnapChecking(true);
+    setSnapError('');
+    setSnapAutoNote('');
+    try {
+      const ai = new GoogleGenAI({ apiKey: GEMINI_KEY });
+      const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
+      const sitesForCategory =
+        category === 'Cards'
+          ? 'eBay Sold, TCGplayer, PriceCharting, COMC, CollX'
+          : category === 'Comics'
+            ? 'eBay Sold, MyComicShop, Heritage'
+            : 'eBay Sold, Mercari';
+      const prompt =
+        `You are pricing a collectible from a photo. Identify the exact item: full title, series/set, year, and issue number or card number if visible.\n` +
+        `Category: ${category}.\n` +
+        `Price sources to use, in this order: ${sitesForCategory}.\n` +
+        `Search the web for RECENT SOLD / completed listings for this exact item — not asking prices, not unsold listings. For each source where you actually found a sold price, give the sold price in US dollars and a link to the sold listing or search results page.\n` +
+        `Return STRICT JSON ONLY, no markdown fences, no extra text:\n` +
+        `{"title": "exact item name, e.g. Amazing Spider-Man #300, 1988", "details": "series/set, year, issue or card number", "prices": [{"site": "eBay Sold", "value": 12.50, "url": "https://..."}], "low": 0, "high": 0, "average": 0, "confidence": "high | medium | low", "note": "one short line, e.g. which prices are sold vs asking, or what you could not find"}\n` +
+        `Rules: only include a site if you found a real sold price for it. If you could not find sold prices for a site, leave it out and say so in "note". NEVER invent a price — a missing price is better than a fake one. Prices must be numbers in US dollars.`;
+      const resp = await ai.models.generateContent({
+        model: GEMINI_MODEL,
+        contents: [
+          { inlineData: { mimeType: 'image/jpeg', data: base64 } },
+          { text: prompt },
+        ],
+        config: { tools: [{ googleSearch: {} }] },
+      });
+      if (runId !== snapCheckRunRef.current) return;
+      const parsed = parseGeminiPriceJson(extractResponseText(resp));
+      const knownSites = MARKETPLACES_BY_CATEGORY[category].map((s) => s.name);
+      const nextPrices: Record<string, string> = {};
+      let matched = 0;
+      for (const row of parsed?.prices ?? []) {
+        const value = Number(row?.value);
+        if (!row?.site || !Number.isFinite(value) || value <= 0) continue;
+        const match = knownSites.find((name) => {
+          const a = normalizeSiteName(name);
+          const b = normalizeSiteName(String(row.site));
+          return a === b || b.includes(a) || a.includes(b);
+        });
+        if (!match) continue;
+        nextPrices[match] = String(Math.round(value * 100) / 100);
+        matched += 1;
+      }
+      if (matched === 0) {
+        throw new Error('Gemini did not return any sold prices for this item.');
+      }
+      setSnapPrices(nextPrices);
+      if (parsed?.title && !snapTitle.trim()) {
+        setSnapTitle(parsed.title.trim());
+      }
+      const noteBits = [
+        `✨ Auto-priced from ${matched} ${matched === 1 ? 'site' : 'sites'}`,
+        parsed?.confidence ? `· confidence: ${parsed.confidence}` : '',
+        parsed?.details ? `· ${parsed.details}` : '',
+        parsed?.note ? `· ${parsed.note}` : '',
+      ]
+        .filter(Boolean)
+        .join(' ');
+      setSnapAutoNote(noteBits);
+    } catch (err) {
+      if (runId !== snapCheckRunRef.current) return;
+      const reason =
+        err instanceof Error && err.message ? err.message : 'the price check failed';
+      setSnapError(
+        `Couldn't check prices automatically — ${reason}. You can still type the sold prices in below, or add the Gemini key in AI Studio → Secrets → GEMINI_API_KEY.`,
+      );
+    } finally {
+      if (runId === snapCheckRunRef.current) setSnapChecking(false);
+    }
+  };
+
   const handleSnapPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     try {
       const dataUrl = await compressImageFile(file);
       setSnapPhoto(dataUrl);
+      // Fresh photo = fresh item: clear the old name/prices so the auto
+      // check fills them in for this item, not the last one.
+      setSnapTitle('');
+      setSnapPrices({});
+      setSnapAutoNote('');
       setSnapError('');
+      // Automatically identify it and check sold prices — no searching.
+      await runAutoPriceCheck(dataUrl, snapCategory);
     } catch {
       setSnapError('Could not process that image file. Try a JPG, PNG, or WEBP photo.');
     }
@@ -770,6 +946,7 @@ export default function App() {
     setItems((prev) => [nextItem, ...prev]);
     setSnapOpen(false);
     setSnapPrices({});
+    setSnapAutoNote('');
     setSnapError('');
     showToast(
       keep
@@ -1336,9 +1513,10 @@ export default function App() {
                 📸 Snap &amp; Price
               </h2>
               <p className="text-xs text-[#8E8A81] leading-relaxed">
-                1. Take a clear photo of the front. 2. Tap Identify with Lens — it shares the
-                photo to Lens on your phone, Lens names it, then type that name below. 3. Tap
-                each site, look at what it actually sold for, type that price in — the app
+                1. Take a clear photo of the front — the app identifies it and checks sold
+                prices on the sites for you, no searching needed. 2. Check the name and prices
+                it filled in, fix anything that looks wrong. 3. If it could not check a price,
+                use Lens or CollX below, or tap a site and type the sold price in — the app
                 averages them and that becomes your value.
               </p>
             </div>
@@ -1382,6 +1560,30 @@ export default function App() {
                     alt="Snapped item for price check"
                     className="mt-3 max-h-64 rounded-xl border border-white/[0.08] object-contain"
                   />
+                )}
+                {snapChecking && (
+                  <div className="mt-3 px-3.5 py-2.5 rounded-xl bg-[#1C1912] border border-[#D4AF37]/50 text-xs text-[#F6E29D] flex items-center gap-2">
+                    <Sparkles className="w-4 h-4 text-[#D4AF37] animate-pulse shrink-0" />
+                    <span>
+                      ✨ Checking prices… identifying this item and searching sold prices —
+                      takes a few seconds.
+                    </span>
+                  </div>
+                )}
+                {snapPhoto && !snapChecking && (
+                  <button
+                    type="button"
+                    onClick={() => runAutoPriceCheck(snapPhoto, snapCategory)}
+                    className="mt-3 min-h-[44px] px-4 py-2 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-[#09090B] text-sm font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
+                  >
+                    <RotateCcw className="w-4 h-4" />
+                    <span>↻ Check prices again</span>
+                  </button>
+                )}
+                {snapAutoNote && !snapChecking && (
+                  <p className="mt-2 text-[11px] text-[#A8C686] leading-relaxed">
+                    {snapAutoNote}
+                  </p>
                 )}
               </div>
 
@@ -1476,7 +1678,7 @@ export default function App() {
                   htmlFor="snap-title"
                   className="block text-xs font-medium text-[#A19D94] mb-1.5"
                 >
-                  What is it? (from Lens, or type it yourself)
+                  What is it? (filled in automatically, or type it yourself)
                 </label>
                 <input
                   id="snap-title"
@@ -1531,7 +1733,8 @@ export default function App() {
                 </div>
                 <p className="mt-1.5 text-[11px] text-[#8E8A81]">
                   Tip: on eBay tap “Sold listings” — that is the real price. Ignore asking
-                  prices that never sold.
+                  prices that never sold. Prices filled in automatically can be tapped and
+                  changed.
                 </p>
               </div>
 
