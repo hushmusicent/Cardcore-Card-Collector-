@@ -70,7 +70,7 @@ interface MarketplaceLink {
 }
 
 const STORAGE_KEY = 'cardcore_collectors_vault_v1';
-const BUILD_VERSION = 'v2026.11.21.1';
+const BUILD_VERSION = 'v2026.11.21.2';
 
 const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
   Comics: [
@@ -903,6 +903,33 @@ export default function App() {
     }
   };
 
+  // Erase a snapped photo so a new one can be taken. Clearing the front
+  // starts a fresh item (the back, name and prices belong to the old one);
+  // clearing the back just removes the back. Resetting the file input means
+  // re-taking the same photo still fires the picker. Bumping the run id
+  // cancels a price check that is still running.
+  const clearSnapFrontPhoto = () => {
+    if (snapInputRef.current) snapInputRef.current.value = '';
+    snapCheckRunRef.current += 1;
+    setSnapPhoto('');
+    setSnapBackPhoto('');
+    setSnapTitle('');
+    setSnapSeries('');
+    setSnapNumber('');
+    setSnapYear('');
+    setSnapPublisher('');
+    setSnapPrices({});
+    setSnapEstValue('');
+    snapEstTouchedRef.current = false;
+    setSnapAutoNote('');
+    setSnapError('');
+  };
+
+  const clearSnapBackPhoto = () => {
+    if (snapBackInputRef.current) snapBackInputRef.current.value = '';
+    setSnapBackPhoto('');
+  };
+
   const downloadSnapPhoto = () => {
     if (!snapPhoto) {
       showToast('Take a photo first.', 'error');
@@ -1620,11 +1647,21 @@ export default function App() {
                       />
                     </label>
                     {snapPhoto && (
-                      <img
-                        src={snapPhoto}
-                        alt="Front of snapped item"
-                        className="max-h-48 w-full rounded-xl border border-white/[0.08] object-contain"
-                      />
+                      <>
+                        <img
+                          src={snapPhoto}
+                          alt="Front of snapped item"
+                          className="max-h-48 w-full rounded-xl border border-white/[0.08] object-contain"
+                        />
+                        <button
+                          type="button"
+                          onClick={clearSnapFrontPhoto}
+                          className="min-h-[40px] w-full px-3 py-2 rounded-xl bg-[#261416] hover:bg-[#33181B] border border-red-500/30 text-xs font-medium text-red-200 flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                          <span>Remove front — take a new one</span>
+                        </button>
+                      </>
                     )}
                   </div>
                   <div className="space-y-2">
@@ -1641,11 +1678,21 @@ export default function App() {
                       />
                     </label>
                     {snapBackPhoto && (
-                      <img
-                        src={snapBackPhoto}
-                        alt="Back of snapped item"
-                        className="max-h-48 w-full rounded-xl border border-white/[0.08] object-contain"
-                      />
+                      <>
+                        <img
+                          src={snapBackPhoto}
+                          alt="Back of snapped item"
+                          className="max-h-48 w-full rounded-xl border border-white/[0.08] object-contain"
+                        />
+                        <button
+                          type="button"
+                          onClick={clearSnapBackPhoto}
+                          className="min-h-[40px] w-full px-3 py-2 rounded-xl bg-[#261416] hover:bg-[#33181B] border border-red-500/30 text-xs font-medium text-red-200 flex items-center justify-center gap-1.5 cursor-pointer"
+                        >
+                          <X className="w-4 h-4" />
+                          <span>Remove back — take a new one</span>
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>
