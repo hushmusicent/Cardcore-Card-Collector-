@@ -2,5 +2,7 @@
   "name": "Cardcore Collectors",
   "description": "Phone-first dark and gold collectibles vault for comics, trading cards, and toys with instant marketplace price checks, per-item auction tracking, and JSON/CSV backup.",
   "requestFramePermissions": [],
-  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
 }

@@ -1,4 +1,3 @@
-import { GoogleGenAI } from '@google/genai';
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import {
   ArrowDownRight,
@@ -435,34 +434,6 @@ function loadStoredItems(): CollectibleItem[] {
   return createSampleItems();
 }
 
-// --- Automatic identify & price (Gemini vision + Google Search) ---
-// AI Studio injects GEMINI_API_KEY from the user's Secrets at build time via
-// the `define` in vite.config.ts. The key is read here (and from
-// VITE_GEMINI_API_KEY as a fallback) so the app never hardcodes a secret.
-// It is read inside try/catch because `process` does not exist in the
-// browser bundle — the vite define replaces the process.env read with the
-// injected key string at build time, and the catch covers a build where the
-// define did not apply.
-function readGeminiKey(): string {
-  try {
-    const viteKey = (import.meta as any).env?.VITE_GEMINI_API_KEY as string | undefined;
-    if (viteKey) return String(viteKey);
-  } catch {
-    // import.meta.env is not available outside a Vite build — ignore.
-  }
-  try {
-    // Replaced at build time by vite.config.ts define with the injected key.
-    const injected = (process as any).env.GEMINI_API_KEY as string | undefined;
-    if (injected) return String(injected);
-  } catch {
-    // `process` is not defined in the browser without the define — ignore.
-  }
-  return '';
-}
-
-const GEMINI_KEY = readGeminiKey();
-const GEMINI_MODEL = 'gemini-2.5-flash';
-
 interface GeminiPriceRow {
   site: string;
   value: number;
@@ -473,44 +444,13 @@ interface GeminiPriceResult {
   title?: string;
   details?: string;
   prices?: GeminiPriceRow[];
-  low?: number;
-  high?: number;
-  average?: number;
   confidence?: string;
   note?: string;
+  error?: string;
 }
 
 function normalizeSiteName(name: string): string {
   return name.toLowerCase().replace(/[^a-z0-9]/g, '');
-}
-
-function extractResponseText(resp: unknown): string {
-  if (!resp || typeof resp !== 'object') return '';
-  const direct = (resp as { text?: unknown }).text;
-  if (typeof direct === 'string' && direct.trim()) return direct;
-  const candidates = (resp as { candidates?: Array<{ content?: { parts?: Array<{ text?: unknown }> } }> })
-    .candidates ?? [];
-  return candidates
-    .flatMap((c) => c.content?.parts ?? [])
-    .map((part) => (typeof part.text === 'string' ? part.text : ''))
-    .join('');
-}
-
-function parseGeminiPriceJson(raw: string): GeminiPriceResult | null {
-  if (!raw) return null;
-  let cleaned = raw.trim();
-  const fence = cleaned.match(/```(?:json)?\s*([\s\S]*?)\s*```/);
-  if (fence?.[1]) cleaned = fence[1];
-  const start = cleaned.indexOf('{');
-  const end = cleaned.lastIndexOf('}');
-  if (start >= 0 && end > start) cleaned = cleaned.slice(start, end + 1);
-  try {
-    const parsed = JSON.parse(cleaned) as GeminiPriceResult;
-    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-    return parsed;
-  } catch {
-    return null;
-  }
 }
 
 export default function App() {
@@ -765,50 +705,29 @@ export default function App() {
     }
   };
 
-  // Identifies the snapped item with Gemini vision, then uses Gemini with
-  // Google Search grounding to find RECENT SOLD prices on the sites for this
-  // category and fills the title + per-site price rows in automatically.
-  // The user never searches — they only check what it filled in. Missing
-  // key or failed call never crashes: it shows why and manual entry keeps
-  // working exactly as before.
+  // Sends the snapped item photo to the server endpoint, which identifies the
+  // collectible with Gemini vision + Google Search grounding and returns recent
+  // sold prices. Missing key or failed calls show a clear message while manual
+  // entry keeps working as before.
   const runAutoPriceCheck = async (dataUrl: string, category: Category) => {
     const runId = ++snapCheckRunRef.current;
-    if (!GEMINI_KEY) {
-      setSnapError(
-        'Automatic price check needs a Gemini key — add GEMINI_API_KEY in AI Studio → Secrets, then rebuild. You can still type the sold prices in below, or use Lens / CollX.',
-      );
-      return;
-    }
     setSnapChecking(true);
     setSnapError('');
     setSnapAutoNote('');
     try {
-      const ai = new GoogleGenAI({ apiKey: GEMINI_KEY });
-      const base64 = dataUrl.includes(',') ? dataUrl.split(',')[1] : dataUrl;
-      const sitesForCategory =
-        category === 'Cards'
-          ? 'eBay Sold, TCGplayer, PriceCharting, COMC, CollX'
-          : category === 'Comics'
-            ? 'eBay Sold, MyComicShop, Heritage'
-            : 'eBay Sold, Mercari';
-      const prompt =
-        `You are pricing a collectible from a photo. Identify the exact item: full title, series/set, year, and issue number or card number if visible.\n` +
-        `Category: ${category}.\n` +
-        `Price sources to use, in this order: ${sitesForCategory}.\n` +
-        `Search the web for RECENT SOLD / completed listings for this exact item — not asking prices, not unsold listings. For each source where you actually found a sold price, give the sold price in US dollars and a link to the sold listing or search results page.\n` +
-        `Return STRICT JSON ONLY, no markdown fences, no extra text:\n` +
-        `{"title": "exact item name, e.g. Amazing Spider-Man #300, 1988", "details": "series/set, year, issue or card number", "prices": [{"site": "eBay Sold", "value": 12.50, "url": "https://..."}], "low": 0, "high": 0, "average": 0, "confidence": "high | medium | low", "note": "one short line, e.g. which prices are sold vs asking, or what you could not find"}\n` +
-        `Rules: only include a site if you found a real sold price for it. If you could not find sold prices for a site, leave it out and say so in "note". NEVER invent a price — a missing price is better than a fake one. Prices must be numbers in US dollars.`;
-      const resp = await ai.models.generateContent({
-        model: GEMINI_MODEL,
-        contents: [
-          { inlineData: { mimeType: 'image/jpeg', data: base64 } },
-          { text: prompt },
-        ],
-        config: { tools: [{ googleSearch: {} }] },
+      const response = await fetch('/api/price-check', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ imageDataUrl: dataUrl, category }),
       });
+
+      const parsed = (await response.json().catch(() => null)) as GeminiPriceResult | null;
       if (runId !== snapCheckRunRef.current) return;
-      const parsed = parseGeminiPriceJson(extractResponseText(resp));
+
+      if (!response.ok) {
+        throw new Error(parsed?.error || 'the price check failed');
+      }
+
       const knownSites = MARKETPLACES_BY_CATEGORY[category].map((s) => s.name);
       const nextPrices: Record<string, string> = {};
       let matched = 0;
@@ -845,7 +764,7 @@ export default function App() {
       const reason =
         err instanceof Error && err.message ? err.message : 'the price check failed';
       setSnapError(
-        `Couldn't check prices automatically — ${reason}. You can still type the sold prices in below, or add the Gemini key in AI Studio → Secrets → GEMINI_API_KEY.`,
+        `Couldn't check prices automatically — ${reason} You can still type the sold prices in below, or use Lens / CollX.`,
       );
     } finally {
       if (runId === snapCheckRunRef.current) setSnapChecking(false);
