@@ -70,7 +70,7 @@ interface MarketplaceLink {
 }
 
 const STORAGE_KEY = 'cardcore_collectors_vault_v1';
-const BUILD_VERSION = 'v2026.11.21.2';
+const BUILD_VERSION = 'v2026.11.21.3';
 
 const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
   Comics: [
@@ -1647,7 +1647,7 @@ export default function App() {
                       />
                     </label>
                     {snapPhoto && (
-                      <>
+                      <div className="relative">
                         <img
                           src={snapPhoto}
                           alt="Front of snapped item"
@@ -1656,12 +1656,12 @@ export default function App() {
                         <button
                           type="button"
                           onClick={clearSnapFrontPhoto}
-                          className="min-h-[40px] w-full px-3 py-2 rounded-xl bg-[#261416] hover:bg-[#33181B] border border-red-500/30 text-xs font-medium text-red-200 flex items-center justify-center gap-1.5 cursor-pointer"
+                          aria-label="Remove front photo"
+                          className="absolute top-2 right-2 w-9 h-9 rounded-full bg-black/70 hover:bg-red-600 border border-white/40 text-white flex items-center justify-center cursor-pointer"
                         >
-                          <X className="w-4 h-4" />
-                          <span>Remove front — take a new one</span>
+                          <X className="w-5 h-5" />
                         </button>
-                      </>
+                      </div>
                     )}
                   </div>
                   <div className="space-y-2">
@@ -1678,7 +1678,7 @@ export default function App() {
                       />
                     </label>
                     {snapBackPhoto && (
-                      <>
+                      <div className="relative">
                         <img
                           src={snapBackPhoto}
                           alt="Back of snapped item"
@@ -1687,12 +1687,12 @@ export default function App() {
                         <button
                           type="button"
                           onClick={clearSnapBackPhoto}
-                          className="min-h-[40px] w-full px-3 py-2 rounded-xl bg-[#261416] hover:bg-[#33181B] border border-red-500/30 text-xs font-medium text-red-200 flex items-center justify-center gap-1.5 cursor-pointer"
+                          aria-label="Remove back photo"
+                          className="absolute top-2 right-2 w-9 h-9 rounded-full bg-black/70 hover:bg-red-600 border border-white/40 text-white flex items-center justify-center cursor-pointer"
                         >
-                          <X className="w-4 h-4" />
-                          <span>Remove back — take a new one</span>
+                          <X className="w-5 h-5" />
                         </button>
-                      </>
+                      </div>
                     )}
                   </div>
                 </div>
