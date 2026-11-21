@@ -27,7 +27,7 @@ interface GeminiPriceResult {
   note?: string;
 }
 
-const GEMINI_MODEL = 'gemini-2.5-flash';
+const GEMINI_MODEL = 'gemini-3.8-flash';
 const ALLOWED_CATEGORIES: ReadonlySet<string> = new Set(['Comics', 'Cards', 'Toys']);
 const ALLOWED_MIME_TYPES: ReadonlySet<string> = new Set([
   'image/jpeg',
