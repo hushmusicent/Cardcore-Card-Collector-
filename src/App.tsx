@@ -64,11 +64,12 @@ interface CollectibleItem {
 interface MarketplaceLink {
   name: string;
   highlight?: boolean;
+  note?: string;
   buildUrl: (query: string) => string;
 }
 
 const STORAGE_KEY = 'cardcore_collectors_vault_v1';
-const BUILD_VERSION = 'v2026.11.20.4';
+const BUILD_VERSION = 'v2026.11.20.5';
 
 const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
   Comics: [
@@ -128,6 +129,11 @@ const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
       name: 'Mercari',
       buildUrl: (q) => `https://www.mercari.com/search/?keyword=${encodeURIComponent(q)}`,
     },
+    {
+      name: 'CollX',
+      note: 'Scan in app',
+      buildUrl: () => 'https://collx.app/',
+    },
   ],
   Toys: [
     {
@@ -160,6 +166,7 @@ const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
 
 const TOP_HUB_MARKETPLACES: Array<{
   name: string;
+  note?: string;
   homeUrl: string;
   searchUrl: (q: string) => string;
 }> = [
@@ -202,6 +209,12 @@ const TOP_HUB_MARKETPLACES: Array<{
     name: 'COMC',
     homeUrl: 'https://www.comc.com/',
     searchUrl: (q) => `https://www.comc.com/Cards/Search?q=${encodeURIComponent(q)}`,
+  },
+  {
+    name: 'CollX',
+    note: 'Scan cards — instant value',
+    homeUrl: 'https://collx.app/',
+    searchUrl: () => 'https://collx.app/',
   },
 ];
 
@@ -1299,7 +1312,12 @@ export default function App() {
                   rel="noopener noreferrer"
                   className="min-h-[44px] px-3 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.08] hover:border-[#D4AF37]/50 text-xs font-medium text-[#E8E4DA] hover:text-[#F6E29D] flex items-center justify-between gap-1.5 transition-colors whitespace-nowrap"
                 >
-                  <span className="truncate">{site.name}</span>
+                  <span className="flex flex-col min-w-0 leading-tight">
+                    <span className="truncate">{site.name}</span>
+                    {site.note && (
+                      <span className="text-[10px] text-[#8E8A81] truncate">{site.note}</span>
+                    )}
+                  </span>
                   <ExternalLink className="w-3.5 h-3.5 text-[#D4AF37] shrink-0" />
                 </a>
               );
@@ -1375,6 +1393,28 @@ export default function App() {
                 <Search className="w-4 h-4" />
                 <span>🔍 Identify with Lens — share this photo</span>
               </button>
+              {snapCategory === 'Cards' && (
+                <>
+                  <button
+                    type="button"
+                    onClick={() =>
+                      window.open(
+                        'https://play.google.com/store/apps/details?id=app.collx.android',
+                        '_blank',
+                      )
+                    }
+                    className="w-full min-h-[48px] px-4 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-[#D4AF37]/50 text-sm font-semibold text-[#F6E29D] flex items-center justify-center gap-2 cursor-pointer transition-colors"
+                  >
+                    <span aria-hidden="true">📷</span>
+                    <span>Scan with CollX</span>
+                    <ExternalLink className="w-3.5 h-3.5 text-[#D4AF37]" />
+                  </button>
+                  <p className="text-[11px] text-[#8E8A81] leading-relaxed">
+                    CollX scans sports + Pokemon/Magic/Yu-Gi-Oh cards and gives the average
+                    value — scan it there, then type the name + price back here.
+                  </p>
+                </>
+              )}
               <div className="flex flex-wrap items-center gap-2">
                 <button
                   type="button"
@@ -1461,6 +1501,9 @@ export default function App() {
                         {site.name}
                         {site.name === 'eBay Sold' && (
                           <span className="text-[#8E8A81] font-normal"> — use this one most</span>
+                        )}
+                        {site.name === 'CollX' && (
+                          <span className="text-[#8E8A81] font-normal"> — scan in app</span>
                         )}
                       </span>
                       <input
