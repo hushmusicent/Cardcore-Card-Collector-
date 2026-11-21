@@ -15,6 +15,10 @@ interface GeminiPriceRow {
 interface GeminiPriceResult {
   title?: string;
   details?: string;
+  series?: string;
+  number?: string;
+  year?: string;
+  publisher?: string;
   prices?: GeminiPriceRow[];
   low?: number;
   high?: number;
@@ -111,7 +115,7 @@ async function startServer() {
   app.use(express.json({ limit: '10mb' }));
 
   app.post('/api/price-check', async (req: Request, res: Response) => {
-    const body = req.body as { imageDataUrl?: unknown; category?: unknown } | undefined;
+    const body = req.body as { imageDataUrl?: unknown; backImageDataUrl?: unknown; category?: unknown } | undefined;
 
     const categoryRaw = typeof body?.category === 'string' ? body.category : '';
     if (!ALLOWED_CATEGORIES.has(categoryRaw)) {
@@ -137,6 +141,30 @@ async function startServer() {
       return;
     }
 
+    // Optional back photo — validated exactly like the front photo.
+    let parsedBackImage: { mimeType: string; base64: string } | null = null;
+    if (
+      body?.backImageDataUrl !== undefined &&
+      body.backImageDataUrl !== null &&
+      body.backImageDataUrl !== ''
+    ) {
+      if (
+        typeof body.backImageDataUrl !== 'string' ||
+        body.backImageDataUrl.length === 0 ||
+        body.backImageDataUrl.length > 8_000_000
+      ) {
+        res.status(400).json({ error: 'Please provide a valid back photo.' });
+        return;
+      }
+      parsedBackImage = parseImagePayload(body.backImageDataUrl);
+      if (!parsedBackImage) {
+        res.status(400).json({
+          error: 'Unsupported back image format. Please upload a JPG, PNG, or WEBP photo.',
+        });
+        return;
+      }
+    }
+
     const ai = getAiClient();
     if (!ai) {
       res.status(503).json({
@@ -155,26 +183,38 @@ async function startServer() {
 
     const prompt =
       `You are pricing a collectible from a photo. Identify the exact item: full title, series/set, year, and issue number or card number if visible.\n` +
+      (parsedBackImage
+        ? `Two photos are provided: the FIRST is the FRONT of the item, the SECOND is the BACK. Read the back carefully — the set/series name, card or issue number, year and publisher are usually printed there — and use them to identify the exact item.\n`
+        : `Only the front photo is provided.\n`) +
       `Category: ${category}.\n` +
       `Price sources to use, in this order: ${sitesForCategory}.\n` +
       `Search the web for RECENT SOLD / completed listings for this exact item — not asking prices, not unsold listings. For each source where you actually found a sold price, give the sold price in US dollars and a link to the sold listing or search results page.\n` +
       `Return STRICT JSON ONLY, no markdown fences, no extra text:\n` +
-      `{"title": "exact item name, e.g. Amazing Spider-Man #300, 1988", "details": "series/set, year, issue or card number", "prices": [{"site": "eBay Sold", "value": 12.50, "url": "https://..."}], "low": 0, "high": 0, "average": 0, "confidence": "high | medium | low", "note": "one short line, e.g. which prices are sold vs asking, or what you could not find"}\n` +
-      `Rules: only include a site if you found a real sold price for it. If you could not find sold prices for a site, leave it out and say so in "note". NEVER invent a price — a missing price is better than a fake one. Prices must be numbers in US dollars.`;
+      `{"title": "exact item name, e.g. Amazing Spider-Man #300, 1988", "details": "series/set, year, issue or card number", "series": "set/series name read from the back, or empty string", "number": "card or issue number read from the back, or empty string", "year": "year read from the back, or empty string", "publisher": "publisher/brand read from the back, or empty string", "prices": [{"site": "eBay Sold", "value": 12.50, "url": "https://..."}], "low": 0, "high": 0, "average": 0, "confidence": "high | medium | low", "note": "one short line, e.g. which prices are sold vs asking, or what you could not find"}\n` +
+      `Rules: only include a site if you found a real sold price for it. If you could not find sold prices for a site, leave it out and say so in "note". NEVER invent a price — a missing price is better than a fake one. Prices must be numbers in US dollars. Never invent the series, number, year or publisher either — use an empty string when they are not visible on the photos.`;
 
     try {
+      const imageParts: Array<{ inlineData: { mimeType: string; data: string } }> = [
+        {
+          inlineData: {
+            mimeType: parsedImage.mimeType,
+            data: parsedImage.base64,
+          },
+        },
+      ];
+      if (parsedBackImage) {
+        imageParts.push({
+          inlineData: {
+            mimeType: parsedBackImage.mimeType,
+            data: parsedBackImage.base64,
+          },
+        });
+      }
+
       const resp = await ai.models.generateContent({
         model: GEMINI_MODEL,
         contents: {
-          parts: [
-            {
-              inlineData: {
-                mimeType: parsedImage.mimeType,
-                data: parsedImage.base64,
-              },
-            },
-            { text: prompt },
-          ],
+          parts: [...imageParts, { text: prompt }],
         },
         config: {
           tools: [{ googleSearch: {} }],
@@ -197,9 +237,19 @@ async function startServer() {
           url: sanitizeHttpUrl(row.url),
         }));
 
+      const cleanDetail = (val: unknown): string | undefined => {
+        if (typeof val !== 'string') return undefined;
+        const trimmed = val.trim();
+        return trimmed ? trimmed : undefined;
+      };
+
       res.json({
-        title: typeof parsed.title === 'string' ? parsed.title.trim() : undefined,
-        details: typeof parsed.details === 'string' ? parsed.details.trim() : undefined,
+        title: cleanDetail(parsed.title),
+        details: cleanDetail(parsed.details),
+        series: cleanDetail(parsed.series),
+        number: cleanDetail(parsed.number),
+        year: cleanDetail(parsed.year),
+        publisher: cleanDetail(parsed.publisher),
         prices: sanitizedPrices,
         confidence: typeof parsed.confidence === 'string' ? parsed.confidence.trim() : undefined,
         note: typeof parsed.note === 'string' ? parsed.note.trim() : undefined,

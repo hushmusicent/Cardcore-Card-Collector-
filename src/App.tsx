@@ -53,6 +53,7 @@ interface CollectibleItem {
   paid: number;
   estValue: number;
   photo: string;
+  backPhoto?: string;
   notes?: string;
   status: 'Active' | 'Sold';
   soldPrice?: number;
@@ -69,7 +70,7 @@ interface MarketplaceLink {
 }
 
 const STORAGE_KEY = 'cardcore_collectors_vault_v1';
-const BUILD_VERSION = 'v2026.11.20.6';
+const BUILD_VERSION = 'v2026.11.21.1';
 
 const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
   Comics: [
@@ -443,6 +444,10 @@ interface GeminiPriceRow {
 interface GeminiPriceResult {
   title?: string;
   details?: string;
+  series?: string;
+  number?: string;
+  year?: string;
+  publisher?: string;
   prices?: GeminiPriceRow[];
   confidence?: string;
   note?: string;
@@ -476,6 +481,7 @@ export default function App() {
   const [formPaid, setFormPaid] = useState('');
   const [formEstValue, setFormEstValue] = useState('');
   const [formPhoto, setFormPhoto] = useState('');
+  const [formBackPhoto, setFormBackPhoto] = useState('');
   const [formNotes, setFormNotes] = useState('');
   const [formEnableAuction, setFormEnableAuction] = useState(false);
   const [formStartingBid, setFormStartingBid] = useState('');
@@ -494,6 +500,17 @@ export default function App() {
   const [snapAutoNote, setSnapAutoNote] = useState('');
   const snapCheckRunRef = useRef(0);
   const snapInputRef = useRef<HTMLInputElement | null>(null);
+  const snapBackInputRef = useRef<HTMLInputElement | null>(null);
+  const [snapBackPhoto, setSnapBackPhoto] = useState('');
+  const [snapSeries, setSnapSeries] = useState('');
+  const [snapNumber, setSnapNumber] = useState('');
+  const [snapYear, setSnapYear] = useState('');
+  const [snapPublisher, setSnapPublisher] = useState('');
+  // The worth that will be saved on the item — always visible in the Snap
+  // panel, pre-filled from the auto average when there is one. The user sees
+  // (and can change) it before anything saves, so nothing saves at $0 unseen.
+  const [snapEstValue, setSnapEstValue] = useState('');
+  const snapEstTouchedRef = useRef(false);
 
   // Live low / high / average from the sold prices typed in Snap & Price
   const snapSummary = useMemo(() => {
@@ -523,6 +540,9 @@ export default function App() {
 
   // Broken image fallback tracking
   const [brokenImages, setBrokenImages] = useState<Record<string, boolean>>({});
+
+  // Which item card is showing its back photo (tap the photo to flip)
+  const [flippedItemId, setFlippedItemId] = useState<string | null>(null);
 
   const jsonInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -581,6 +601,29 @@ export default function App() {
       return haystack.includes(q);
     });
   }, [items, activeTab, statusFilter, searchQuery]);
+
+  // Group the visible items so like items sit together: by series/set when
+  // known, else by publisher/brand, else Unsorted. Respects tab, status
+  // filter and search because it is built from filteredItems.
+  const groupedItems = useMemo(() => {
+    const groups: Array<{ name: string; items: CollectibleItem[]; totalWorth: number }> = [];
+    const byName = new Map<string, (typeof groups)[number]>();
+    for (const item of filteredItems) {
+      const name = item.series.trim() || item.publisher.trim() || 'Unsorted';
+      let group = byName.get(name);
+      if (!group) {
+        group = { name, items: [], totalWorth: 0 };
+        byName.set(name, group);
+        groups.push(group);
+      }
+      group.items.push(item);
+      group.totalWorth +=
+        item.status === 'Sold'
+          ? Number(item.soldPrice ?? item.estValue) || 0
+          : Number(item.estValue) || 0;
+    }
+    return groups;
+  }, [filteredItems]);
 
   // Totals across active tab (or overall if All)
   const totals = useMemo(() => {
@@ -652,6 +695,7 @@ export default function App() {
     setFormPaid('');
     setFormEstValue('');
     setFormPhoto('');
+    setFormBackPhoto('');
     setFormNotes('');
     setFormEnableAuction(false);
     setFormStartingBid('');
@@ -674,6 +718,7 @@ export default function App() {
     setFormPaid(String(item.paid));
     setFormEstValue(String(item.estValue));
     setFormPhoto(item.photo);
+    setFormBackPhoto(item.backPhoto ?? '');
     setFormNotes(item.notes ?? '');
     setFormEnableAuction(Boolean(item.auction?.active));
     setFormStartingBid(item.auction ? String(item.auction.startingBid) : '');
@@ -705,12 +750,25 @@ export default function App() {
     }
   };
 
+  const handleBackPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await compressImageFile(file);
+      setFormBackPhoto(dataUrl);
+      setFormError('');
+    } catch {
+      setFormError('Could not process that image file. Try a JPG, PNG, or WEBP photo.');
+    }
+  };
+
   // Sends the snapped item photo to the server endpoint, which identifies the
   // collectible with Gemini vision + Google Search grounding and returns recent
   // sold prices. Missing key or failed calls show a clear message while manual
   // entry keeps working as before.
-  const runAutoPriceCheck = async (dataUrl: string, category: Category) => {
+  const runAutoPriceCheck = async (dataUrl: string, category: Category, backDataUrl?: string) => {
     const runId = ++snapCheckRunRef.current;
+    const hasBack = Boolean(backDataUrl);
     setSnapChecking(true);
     setSnapError('');
     setSnapAutoNote('');
@@ -718,7 +776,11 @@ export default function App() {
       const response = await fetch('/api/price-check', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ imageDataUrl: dataUrl, category }),
+        body: JSON.stringify({
+          imageDataUrl: dataUrl,
+          category,
+          ...(backDataUrl ? { backImageDataUrl: backDataUrl } : {}),
+        }),
       });
 
       const parsed = (await response.json().catch(() => null)) as GeminiPriceResult | null;
@@ -747,13 +809,39 @@ export default function App() {
         throw new Error('Gemini did not return any sold prices for this item.');
       }
       setSnapPrices(nextPrices);
-      if (parsed?.title && !snapTitle.trim()) {
-        setSnapTitle(parsed.title.trim());
+      // Fill in the details the server read (the back usually carries the
+      // set name, number, year and publisher). A back-photo re-check
+      // overwrites them; a front-only check only fills blanks.
+      const fillDetail = (
+        respVal: string | undefined,
+        setVal: (fn: (prev: string) => string) => void,
+      ) => {
+        const v = (respVal ?? '').trim();
+        if (!v) return;
+        setVal((prev) => (hasBack || !prev.trim() ? v : prev));
+      };
+      const respTitle = (parsed?.title ?? '').trim();
+      if (respTitle) {
+        setSnapTitle((prev) => (hasBack || !prev.trim() ? respTitle : prev));
       }
+      fillDetail(parsed?.series, setSnapSeries);
+      fillDetail(parsed?.number, setSnapNumber);
+      fillDetail(parsed?.year, setSnapYear);
+      fillDetail(parsed?.publisher, setSnapPublisher);
+      // Pre-fill the worth field from the auto average — the user sees it
+      // and can change it before saving.
+      const autoVals = Object.values(nextPrices)
+        .map((v) => Number(v) || 0)
+        .filter((v) => v > 0);
+      const autoAvg =
+        autoVals.length > 0 ? autoVals.reduce((a, b) => a + b, 0) / autoVals.length : 0;
+      snapEstTouchedRef.current = false;
+      setSnapEstValue(autoAvg > 0 ? String(Math.round(autoAvg * 100) / 100) : '');
       const noteBits = [
         `✨ Auto-priced from ${matched} ${matched === 1 ? 'site' : 'sites'}`,
         parsed?.confidence ? `· confidence: ${parsed.confidence}` : '',
         parsed?.details ? `· ${parsed.details}` : '',
+        hasBack ? '· back photo read for set / number' : '',
         parsed?.note ? `· ${parsed.note}` : '',
       ]
         .filter(Boolean)
@@ -777,14 +865,39 @@ export default function App() {
     try {
       const dataUrl = await compressImageFile(file);
       setSnapPhoto(dataUrl);
-      // Fresh photo = fresh item: clear the old name/prices so the auto
-      // check fills them in for this item, not the last one.
+      // Fresh photo = fresh item: clear the old name/prices/details so the
+      // auto check fills them in for this item, not the last one.
       setSnapTitle('');
+      setSnapSeries('');
+      setSnapNumber('');
+      setSnapYear('');
+      setSnapPublisher('');
+      setSnapBackPhoto('');
       setSnapPrices({});
+      setSnapEstValue('');
+      snapEstTouchedRef.current = false;
       setSnapAutoNote('');
       setSnapError('');
       // Automatically identify it and check sold prices — no searching.
-      await runAutoPriceCheck(dataUrl, snapCategory);
+      // If the back was already snapped, send it too so the ID is better.
+      await runAutoPriceCheck(dataUrl, snapCategory, snapBackPhoto || undefined);
+    } catch {
+      setSnapError('Could not process that image file. Try a JPG, PNG, or WEBP photo.');
+    }
+  };
+
+  const handleSnapBackPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await compressImageFile(file);
+      setSnapBackPhoto(dataUrl);
+      setSnapError('');
+      // The back usually carries the set name, number and year — re-run the
+      // check with both photos so the ID (and the filled-in details) improve.
+      if (snapPhoto) {
+        await runAutoPriceCheck(snapPhoto, snapCategory, dataUrl);
+      }
     } catch {
       setSnapError('Could not process that image file. Try a JPG, PNG, or WEBP photo.');
     }
@@ -832,21 +945,32 @@ export default function App() {
       setSnapError('Type what it is first — use Google Lens if you don’t know the name.');
       return;
     }
+    // Never save a $0 worth unseen: the Est. value field sits right above
+    // the save buttons, pre-filled from the auto average when there is one.
+    // An empty field means the price check found nothing — make the user
+    // type a value first. A deliberately typed 0 still saves.
+    if (!snapEstValue.trim()) {
+      setSnapError(
+        'Enter the value first — the price check found no sold prices, so type what it is worth in the Est. value field above before saving.',
+      );
+      return;
+    }
     const keep = how === 'keep';
-    const estNum = Math.round(snapSummary.avg * 100) / 100;
+    const estNum = Math.max(0, Math.round((Number(snapEstValue) || 0) * 100) / 100);
     const nextItem: CollectibleItem = {
       id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
       category: snapCategory,
       title,
-      series: '',
-      number: '',
-      year: '',
-      publisher: '',
+      series: snapSeries.trim(),
+      number: snapNumber.trim(),
+      year: snapYear.trim(),
+      publisher: snapPublisher.trim(),
       condition: 'Near Mint',
       grade: '',
       paid: 0,
       estValue: estNum,
       photo: snapPhoto,
+      backPhoto: snapBackPhoto || undefined,
       notes: 'Priced from photo — Snap & Price',
       status: 'Active',
       auction: keep
@@ -865,6 +989,13 @@ export default function App() {
     setItems((prev) => [nextItem, ...prev]);
     setSnapOpen(false);
     setSnapPrices({});
+    setSnapBackPhoto('');
+    setSnapSeries('');
+    setSnapNumber('');
+    setSnapYear('');
+    setSnapPublisher('');
+    setSnapEstValue('');
+    snapEstTouchedRef.current = false;
     setSnapAutoNote('');
     setSnapError('');
     showToast(
@@ -878,6 +1009,13 @@ export default function App() {
     setSnapCategory(item.category);
     setSnapTitle(buildItemSearchQuery(item));
     setSnapPhoto(item.photo);
+    setSnapBackPhoto(item.backPhoto ?? '');
+    setSnapSeries(item.series);
+    setSnapNumber(item.number);
+    setSnapYear(item.year);
+    setSnapPublisher(item.publisher);
+    setSnapEstValue(String(item.estValue || ''));
+    snapEstTouchedRef.current = true;
     setSnapPrices({});
     setSnapError('');
     setSnapOpen(true);
@@ -928,6 +1066,7 @@ export default function App() {
       paid: paidNum,
       estValue: estNum,
       photo: formPhoto.trim(),
+      backPhoto: formBackPhoto.trim() || undefined,
       notes: formNotes.trim() || undefined,
       status: existing?.status ?? 'Active',
       soldPrice: existing?.soldPrice,
@@ -1147,6 +1286,7 @@ export default function App() {
             paid: Number(raw.paid) || 0,
             estValue: Number(raw.estValue) || 0,
             photo: String(raw.photo ?? ''),
+            backPhoto: raw.backPhoto ? String(raw.backPhoto) : undefined,
             notes: raw.notes ? String(raw.notes) : undefined,
             status: raw.status === 'Sold' ? 'Sold' : 'Active',
             soldPrice: raw.soldPrice !== undefined ? Number(raw.soldPrice) : undefined,
@@ -1187,6 +1327,7 @@ export default function App() {
       'High Bid ($)',
       'Bid Count',
       'Auction Ends At',
+      'Has Back Photo',
     ];
     const rows = items.map((item) => {
       const highBid = getHighBid(item.auction);
@@ -1210,6 +1351,7 @@ export default function App() {
         highBid > 0 ? highBid : '',
         item.auction?.bids.length ?? 0,
         item.auction?.endsAt ?? '',
+        item.backPhoto ? 'Yes' : 'No',
       ]
         .map(escapeCsvCell)
         .join(',');
@@ -1433,7 +1575,9 @@ export default function App() {
               </h2>
               <p className="text-xs text-[#8E8A81] leading-relaxed">
                 1. Take a clear photo of the front — the app identifies it and checks sold
-                prices on the sites for you, no searching needed. 2. Check the name and prices
+                prices on the sites for you, no searching needed. Snap the back too — the
+                set name, number and year are usually printed there, so it IDs the item
+                better. 2. Check the name and prices
                 it filled in, fix anything that looks wrong. 3. If it could not check a price,
                 use Lens or CollX below, or tap a site and type the sold price in — the app
                 averages them and that becomes your value.
@@ -1459,27 +1603,57 @@ export default function App() {
 
               <div>
                 <label className="block text-xs font-medium text-[#A19D94] mb-1.5">
-                  Photo — camera or gallery
+                  Photos — front &amp; back
                 </label>
-                <label className="min-h-[44px] px-4 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.1] text-xs font-medium text-[#F4F1EA] flex items-center gap-2 cursor-pointer w-fit">
-                  <ImagePlus className="w-4 h-4 text-[#D4AF37]" />
-                  <span>Take / Choose Photo</span>
-                  <input
-                    ref={snapInputRef}
-                    type="file"
-                    accept="image/*"
-                    capture="environment"
-                    onChange={handleSnapPhotoUpload}
-                    className="hidden"
-                  />
-                </label>
-                {snapPhoto && (
-                  <img
-                    src={snapPhoto}
-                    alt="Snapped item for price check"
-                    className="mt-3 max-h-64 rounded-xl border border-white/[0.08] object-contain"
-                  />
-                )}
+                <div className="grid grid-cols-2 gap-2">
+                  <div className="space-y-2">
+                    <label className="min-h-[44px] px-3 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.1] text-xs font-medium text-[#F4F1EA] flex items-center justify-center gap-2 cursor-pointer">
+                      <ImagePlus className="w-4 h-4 text-[#D4AF37]" />
+                      <span>Front photo</span>
+                      <input
+                        ref={snapInputRef}
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={handleSnapPhotoUpload}
+                        className="hidden"
+                      />
+                    </label>
+                    {snapPhoto && (
+                      <img
+                        src={snapPhoto}
+                        alt="Front of snapped item"
+                        className="max-h-48 w-full rounded-xl border border-white/[0.08] object-contain"
+                      />
+                    )}
+                  </div>
+                  <div className="space-y-2">
+                    <label className="min-h-[44px] px-3 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.1] text-xs font-medium text-[#F4F1EA] flex items-center justify-center gap-2 cursor-pointer">
+                      <ImagePlus className="w-4 h-4 text-[#D4AF37]" />
+                      <span>Back photo</span>
+                      <input
+                        ref={snapBackInputRef}
+                        type="file"
+                        accept="image/*"
+                        capture="environment"
+                        onChange={handleSnapBackPhotoUpload}
+                        className="hidden"
+                      />
+                    </label>
+                    {snapBackPhoto && (
+                      <img
+                        src={snapBackPhoto}
+                        alt="Back of snapped item"
+                        className="max-h-48 w-full rounded-xl border border-white/[0.08] object-contain"
+                      />
+                    )}
+                  </div>
+                </div>
+                <p className="mt-1.5 text-[11px] text-[#8E8A81]">
+                  Front first — the price check runs on the front. Add the back after: the
+                  set name, number and year are usually printed there, so it re-checks with
+                  both and IDs the item better.
+                </p>
                 {snapChecking && (
                   <div className="mt-3 px-3.5 py-2.5 rounded-xl bg-[#1C1912] border border-[#D4AF37]/50 text-xs text-[#F6E29D] flex items-center gap-2">
                     <Sparkles className="w-4 h-4 text-[#D4AF37] animate-pulse shrink-0" />
@@ -1492,7 +1666,7 @@ export default function App() {
                 {snapPhoto && !snapChecking && (
                   <button
                     type="button"
-                    onClick={() => runAutoPriceCheck(snapPhoto, snapCategory)}
+                    onClick={() => runAutoPriceCheck(snapPhoto, snapCategory, snapBackPhoto || undefined)}
                     className="mt-3 min-h-[44px] px-4 py-2 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-[#09090B] text-sm font-semibold flex items-center gap-1.5 cursor-pointer transition-colors"
                   >
                     <RotateCcw className="w-4 h-4" />
@@ -1579,6 +1753,8 @@ export default function App() {
                       onClick={() => {
                         setSnapCategory(cat);
                         setSnapPrices({});
+                        setSnapEstValue('');
+                        snapEstTouchedRef.current = false;
                       }}
                       className={`min-h-[44px] rounded-xl text-sm font-medium border cursor-pointer transition-colors ${
                         snapCategory === cat
@@ -1611,6 +1787,47 @@ export default function App() {
 
               <div>
                 <div className="text-xs font-medium text-[#A19D94] mb-1.5">
+                  Series / set, number, year, publisher — filled in from the back photo
+                  when the app can read it, fix anything wrong
+                </div>
+                <div className="grid grid-cols-2 gap-2">
+                  <input
+                    type="text"
+                    value={snapSeries}
+                    onChange={(e) => setSnapSeries(e.target.value)}
+                    placeholder="Series / Set"
+                    aria-label="Series or set"
+                    className="min-h-[44px] px-3.5 rounded-xl bg-[#09090B] border border-white/[0.1] text-sm text-[#F4F1EA] placeholder:text-[#6E6A63] focus:outline-none focus:border-[#D4AF37]"
+                  />
+                  <input
+                    type="text"
+                    value={snapNumber}
+                    onChange={(e) => setSnapNumber(e.target.value)}
+                    placeholder="Issue / Card #"
+                    aria-label="Issue or card number"
+                    className="min-h-[44px] px-3.5 rounded-xl bg-[#09090B] border border-white/[0.1] text-sm text-[#F4F1EA] placeholder:text-[#6E6A63] focus:outline-none focus:border-[#D4AF37]"
+                  />
+                  <input
+                    type="text"
+                    value={snapYear}
+                    onChange={(e) => setSnapYear(e.target.value)}
+                    placeholder="Year"
+                    aria-label="Year"
+                    className="min-h-[44px] px-3.5 rounded-xl bg-[#09090B] border border-white/[0.1] text-sm text-[#F4F1EA] placeholder:text-[#6E6A63] focus:outline-none focus:border-[#D4AF37]"
+                  />
+                  <input
+                    type="text"
+                    value={snapPublisher}
+                    onChange={(e) => setSnapPublisher(e.target.value)}
+                    placeholder="Publisher / Brand"
+                    aria-label="Publisher or brand"
+                    className="min-h-[44px] px-3.5 rounded-xl bg-[#09090B] border border-white/[0.1] text-sm text-[#F4F1EA] placeholder:text-[#6E6A63] focus:outline-none focus:border-[#D4AF37]"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <div className="text-xs font-medium text-[#A19D94] mb-1.5">
                   Step 2 — price it on each site
                   {snapTitle.trim() ? ` for “${snapTitle.trim()}”` : ' — type the name above first'}
                   :
@@ -1632,9 +1849,22 @@ export default function App() {
                         min="0"
                         step="0.01"
                         value={snapPrices[site.name] ?? ''}
-                        onChange={(e) =>
-                          setSnapPrices((prev) => ({ ...prev, [site.name]: e.target.value }))
-                        }
+                        onChange={(e) => {
+                          const next = { ...snapPrices, [site.name]: e.target.value };
+                          setSnapPrices(next);
+                          if (!snapEstTouchedRef.current) {
+                            const vals = Object.values(next)
+                              .map((v) => Number(v) || 0)
+                              .filter((v) => v > 0);
+                            const avg =
+                              vals.length > 0
+                                ? vals.reduce((a, b) => a + b, 0) / vals.length
+                                : 0;
+                            setSnapEstValue(
+                              avg > 0 ? String(Math.round(avg * 100) / 100) : '',
+                            );
+                          }
+                        }}
                         placeholder="$ ?"
                         aria-label={`Sold price on ${site.name}`}
                         className="w-24 min-h-[40px] px-2.5 rounded-lg bg-[#121216] border border-white/[0.1] font-mono text-sm text-[#F4F1EA] text-right focus:outline-none focus:border-[#D4AF37]"
@@ -1683,6 +1913,33 @@ export default function App() {
                     — that average becomes your est. value when you save it.
                   </span>
                 )}
+              </div>
+
+              <div>
+                <label
+                  htmlFor="snap-est-value"
+                  className="block text-xs font-medium text-[#A19D94] mb-1.5"
+                >
+                  Est. value when saved ($) — check it before saving
+                </label>
+                <input
+                  id="snap-est-value"
+                  type="number"
+                  min="0"
+                  step="0.01"
+                  value={snapEstValue}
+                  onChange={(e) => {
+                    snapEstTouchedRef.current = true;
+                    setSnapEstValue(e.target.value);
+                  }}
+                  placeholder="Type the value — e.g. 12.50"
+                  className="w-full min-h-[44px] px-3.5 rounded-xl bg-[#09090B] border border-[#D4AF37]/50 font-mono text-sm text-[#E5C158] placeholder:text-[#6E6A63] focus:outline-none focus:border-[#D4AF37]"
+                />
+                <p className="mt-1 text-[11px] text-[#8E8A81]">
+                  This is the worth saved on the item and shown on its card. It fills in
+                  from the price check when there is one — if the check found nothing,
+                  type it in here. The item will not save until this has a number.
+                </p>
               </div>
 
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
@@ -1879,11 +2136,22 @@ export default function App() {
             </div>
           </div>
         ) : (
-          <section
-            aria-label="Collection items"
-            className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6"
-          >
-            {filteredItems.map((item) => {
+          <section aria-label="Collection items" className="space-y-6">
+            {groupedItems.map((group) => (
+              <div key={group.name}>
+                <div className="flex items-baseline justify-between gap-2 px-1 pb-2">
+                  <h2 className="font-display text-base font-semibold text-[#F4F1EA]">
+                    {group.name}
+                    <span className="ml-2 text-xs font-normal text-[#8E8A81]">
+                      {group.items.length} {group.items.length === 1 ? 'item' : 'items'}
+                    </span>
+                  </h2>
+                  <span className="font-mono text-sm font-semibold text-[#E5C158] tabular-nums whitespace-nowrap">
+                    Worth {formatCurrency(group.totalWorth)}
+                  </span>
+                </div>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5 sm:gap-6">
+                  {group.items.map((item) => {
               const query = buildItemSearchQuery(item);
               const marketplaces = MARKETPLACES_BY_CATEGORY[item.category];
               const isSold = item.status === 'Sold';
@@ -1898,6 +2166,7 @@ export default function App() {
                   ? highBid >= auction.reservePrice
                   : true;
               const showFallbackImg = !item.photo || brokenImages[item.id];
+              const showingBack = flippedItemId === item.id && Boolean(item.backPhoto);
 
               return (
                 <article
@@ -1916,8 +2185,8 @@ export default function App() {
                       </div>
                     ) : (
                       <img
-                        src={item.photo}
-                        alt={`${item.title} ${item.number}`.trim()}
+                        src={showingBack && item.backPhoto ? item.backPhoto : item.photo}
+                        alt={`${item.title} ${item.number}${showingBack ? ' (back)' : ''}`.trim()}
                         referrerPolicy="no-referrer"
                         onError={() =>
                           setBrokenImages((prev) => ({
@@ -1927,6 +2196,18 @@ export default function App() {
                         }
                         className="w-full h-full object-cover object-center"
                       />
+                    )}
+
+                    {item.backPhoto && !showFallbackImg && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setFlippedItemId((prev) => (prev === item.id ? null : item.id))
+                        }
+                        className="absolute top-2 right-2 min-h-[36px] px-3 rounded-lg bg-black/70 border border-white/20 text-[11px] font-semibold text-[#F6E29D] cursor-pointer"
+                      >
+                        {showingBack ? 'Flip to front' : 'Flip to back'}
+                      </button>
                     )}
 
                     {/* Clean Sold Overlay Scrim only when sold */}
@@ -2256,8 +2537,11 @@ export default function App() {
                     </div>
                   </div>
                 </article>
-              );
-            })}
+                  );
+                })}
+                </div>
+              </div>
+            ))}
           </section>
         )}
       </main>
@@ -2388,6 +2672,41 @@ export default function App() {
                     >
                       Clear
                     </button>
+                  )}
+                </div>
+              </div>
+
+              {/* Back Photo (optional) */}
+              <div className="space-y-2">
+                <label className="block text-xs font-medium text-[#A19D94]">
+                  Back photo (optional)
+                </label>
+                <div className="flex items-center gap-3">
+                  <label className="min-h-[44px] px-4 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.1] text-xs font-medium text-[#F4F1EA] flex items-center gap-2 cursor-pointer shrink-0">
+                    <ImagePlus className="w-4 h-4 text-[#D4AF37]" />
+                    <span>Upload Back Photo</span>
+                    <input
+                      type="file"
+                      accept="image/*"
+                      onChange={handleBackPhotoUpload}
+                      className="hidden"
+                    />
+                  </label>
+                  {formBackPhoto && (
+                    <>
+                      <img
+                        src={formBackPhoto}
+                        alt="Back of item"
+                        className="h-16 w-16 rounded-lg object-cover border border-white/[0.1] shrink-0"
+                      />
+                      <button
+                        type="button"
+                        onClick={() => setFormBackPhoto('')}
+                        className="min-h-[44px] px-3 rounded-xl bg-[#18181E] border border-white/[0.08] text-xs text-[#A19D94] cursor-pointer"
+                      >
+                        Clear
+                      </button>
+                    </>
                   )}
                 </div>
               </div>
