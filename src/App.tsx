@@ -68,7 +68,7 @@ interface MarketplaceLink {
 }
 
 const STORAGE_KEY = 'cardcore_collectors_vault_v1';
-const BUILD_VERSION = 'v2026.11.20.1';
+const BUILD_VERSION = 'v2026.11.20.4';
 
 const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
   Comics: [
@@ -118,7 +118,7 @@ const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
     },
     {
       name: 'COMC',
-      buildUrl: (q) => `https://www.comc.com/Cards,=${encodeURIComponent(q)}`,
+      buildUrl: (q) => `https://www.comc.com/Cards/Search?q=${encodeURIComponent(q)}`,
     },
     {
       name: 'Whatnot',
@@ -201,7 +201,7 @@ const TOP_HUB_MARKETPLACES: Array<{
   {
     name: 'COMC',
     homeUrl: 'https://www.comc.com/',
-    searchUrl: (q) => `https://www.comc.com/Cards,=${encodeURIComponent(q)}`,
+    searchUrl: (q) => `https://www.comc.com/Cards/Search?q=${encodeURIComponent(q)}`,
   },
 ];
 
@@ -451,6 +451,27 @@ export default function App() {
   const [formAuctionHours, setFormAuctionHours] = useState('72');
   const [formError, setFormError] = useState('');
 
+  // Snap & Price state (photo -> Lens identify -> sold-price average -> save)
+  const [snapOpen, setSnapOpen] = useState(false);
+  const [snapCategory, setSnapCategory] = useState<Category>('Comics');
+  const [snapTitle, setSnapTitle] = useState('');
+  const [snapPhoto, setSnapPhoto] = useState('');
+  const [snapPrices, setSnapPrices] = useState<Record<string, string>>({});
+  const [snapError, setSnapError] = useState('');
+  const snapInputRef = useRef<HTMLInputElement | null>(null);
+
+  // Live low / high / average from the sold prices typed in Snap & Price
+  const snapSummary = useMemo(() => {
+    const vals = Object.values(snapPrices)
+      .map((v) => Number(v) || 0)
+      .filter((v) => v > 0);
+    if (vals.length === 0) return { count: 0, low: 0, high: 0, avg: 0 };
+    const low = Math.min(...vals);
+    const high = Math.max(...vals);
+    const avg = vals.reduce((a, b) => a + b, 0) / vals.length;
+    return { count: vals.length, low, high, avg };
+  }, [snapPrices]);
+
   // Auction / Bid Drawer state
   const [auctionItemId, setAuctionItemId] = useState<string | null>(null);
   const [bidderHandle, setBidderHandle] = useState('');
@@ -647,6 +668,111 @@ export default function App() {
     } catch {
       setFormError('Could not process that image file. Try a JPG, PNG, or WEBP photo.');
     }
+  };
+
+  const handleSnapPhotoUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    try {
+      const dataUrl = await compressImageFile(file);
+      setSnapPhoto(dataUrl);
+      setSnapError('');
+    } catch {
+      setSnapError('Could not process that image file. Try a JPG, PNG, or WEBP photo.');
+    }
+  };
+
+  const downloadSnapPhoto = () => {
+    if (!snapPhoto) {
+      showToast('Take a photo first.', 'error');
+      return;
+    }
+    const link = document.createElement('a');
+    link.href = snapPhoto;
+    link.download = 'snap-for-lens.jpg';
+    document.body.appendChild(link);
+    link.click();
+    link.remove();
+  };
+
+  const shareToLens = async () => {
+    if (!snapPhoto) {
+      showToast('Take a photo first.', 'error');
+      return;
+    }
+    try {
+      const res = await fetch(snapPhoto);
+      const blob = await res.blob();
+      const file = new File([blob], 'snap-for-lens.jpg', { type: 'image/jpeg' });
+      if (navigator.canShare && navigator.canShare({ files: [file] })) {
+        await navigator.share({ files: [file], title: 'Identify this item' });
+        return;
+      }
+      throw new Error('share not supported');
+    } catch {
+      // Lens cannot read a photo straight from a web page, so save it and
+      // open Lens upload — pick the saved photo there and Lens names it.
+      downloadSnapPhoto();
+      showToast('Sharing is not available here, so the photo was saved. Open Lens and pick it to upload.');
+      window.open('https://lens.google.com/upload', '_blank');
+    }
+  };
+
+  const saveSnapItem = (how: 'keep' | 'sale') => {
+    const title = snapTitle.trim();
+    if (!title) {
+      setSnapError('Type what it is first — use Google Lens if you don’t know the name.');
+      return;
+    }
+    const keep = how === 'keep';
+    const estNum = Math.round(snapSummary.avg * 100) / 100;
+    const nextItem: CollectibleItem = {
+      id: `item-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+      category: snapCategory,
+      title,
+      series: '',
+      number: '',
+      year: '',
+      publisher: '',
+      condition: 'Near Mint',
+      grade: '',
+      paid: 0,
+      estValue: estNum,
+      photo: snapPhoto,
+      notes: 'Priced from photo — Snap & Price',
+      status: 'Active',
+      auction: keep
+        ? undefined
+        : {
+            active: true,
+            startingBid: 0.99,
+            reservePrice: undefined,
+            endsAt: new Date(Date.now() + 72 * 3600000).toISOString(),
+            bids: [],
+          },
+      createdAt: new Date().toISOString(),
+    };
+    // Same add path as a normally added item: prepended to the list, so the
+    // existing localStorage effect persists it and totals pick it up.
+    setItems((prev) => [nextItem, ...prev]);
+    setSnapOpen(false);
+    setSnapPrices({});
+    setSnapError('');
+    showToast(
+      keep
+        ? `Put "${title}" in your collection · Est. value ${formatCurrency(estNum)}`
+        : `Listed "${title}" for sale · Est. value ${formatCurrency(estNum)}`,
+    );
+  };
+
+  const priceItem = (item: CollectibleItem) => {
+    setSnapCategory(item.category);
+    setSnapTitle(buildItemSearchQuery(item));
+    setSnapPhoto(item.photo);
+    setSnapPrices({});
+    setSnapError('');
+    setSnapOpen(true);
+    window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
   const handleSaveItem = (e: React.FormEvent) => {
@@ -1181,6 +1307,239 @@ export default function App() {
           </div>
         </section>
 
+        {/* Snap & Price */}
+        <section
+          aria-label="Snap and price"
+          className="bg-[#121216] border border-[#D4AF37]/40 rounded-2xl p-4 sm:p-5 space-y-3.5"
+        >
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h2 className="font-display text-base font-semibold text-[#F4F1EA]">
+                📸 Snap &amp; Price
+              </h2>
+              <p className="text-xs text-[#8E8A81] leading-relaxed">
+                1. Take a clear photo of the front. 2. Tap Identify with Lens — it shares the
+                photo to Lens on your phone, Lens names it, then type that name below. 3. Tap
+                each site, look at what it actually sold for, type that price in — the app
+                averages them and that becomes your value.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => setSnapOpen((v) => !v)}
+              className="min-h-[44px] px-4 py-2 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-[#09090B] text-sm font-semibold flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors shrink-0"
+            >
+              <ImagePlus className="w-4 h-4" />
+              <span>{snapOpen ? 'Hide Snap & Price' : '📸 Snap it — check price'}</span>
+            </button>
+          </div>
+
+          {snapOpen && (
+            <div className="space-y-3.5 pt-1">
+              {snapError && (
+                <div className="px-3.5 py-2.5 rounded-xl bg-rose-950/60 border border-rose-500/40 text-xs text-rose-200">
+                  {snapError}
+                </div>
+              )}
+
+              <div>
+                <label className="block text-xs font-medium text-[#A19D94] mb-1.5">
+                  Photo — camera or gallery
+                </label>
+                <label className="min-h-[44px] px-4 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.1] text-xs font-medium text-[#F4F1EA] flex items-center gap-2 cursor-pointer w-fit">
+                  <ImagePlus className="w-4 h-4 text-[#D4AF37]" />
+                  <span>Take / Choose Photo</span>
+                  <input
+                    ref={snapInputRef}
+                    type="file"
+                    accept="image/*"
+                    capture="environment"
+                    onChange={handleSnapPhotoUpload}
+                    className="hidden"
+                  />
+                </label>
+                {snapPhoto && (
+                  <img
+                    src={snapPhoto}
+                    alt="Snapped item for price check"
+                    className="mt-3 max-h-64 rounded-xl border border-white/[0.08] object-contain"
+                  />
+                )}
+              </div>
+
+              <button
+                type="button"
+                onClick={shareToLens}
+                className="w-full min-h-[48px] px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-[#09090B] text-sm font-semibold flex items-center justify-center gap-2 cursor-pointer transition-colors"
+              >
+                <Search className="w-4 h-4" />
+                <span>🔍 Identify with Lens — share this photo</span>
+              </button>
+              <div className="flex flex-wrap items-center gap-2">
+                <button
+                  type="button"
+                  onClick={downloadSnapPhoto}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.08] text-xs font-medium text-[#E8E4DA] cursor-pointer"
+                >
+                  Download photo
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.open('https://lens.google.com/upload', '_blank')}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.08] text-xs font-medium text-[#E8E4DA] flex items-center gap-1.5 cursor-pointer"
+                >
+                  Open Lens <ExternalLink className="w-3.5 h-3.5 text-[#D4AF37]" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() => window.open('https://www.bing.com/visualsearch', '_blank')}
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.08] text-xs font-medium text-[#E8E4DA] flex items-center gap-1.5 cursor-pointer"
+                >
+                  Bing Visual <ExternalLink className="w-3.5 h-3.5 text-[#D4AF37]" />
+                </button>
+                <button
+                  type="button"
+                  onClick={() =>
+                    showToast('In the eBay app, tap the camera icon in the search bar, then take a photo of your item — eBay will find matching listings.')
+                  }
+                  className="min-h-[40px] px-3.5 py-2 rounded-xl bg-[#18181E] hover:bg-[#222019] border border-white/[0.08] text-xs font-medium text-[#E8E4DA] cursor-pointer"
+                >
+                  eBay Camera — how?
+                </button>
+              </div>
+
+              <div>
+                <label className="block text-xs font-medium text-[#A19D94] mb-1.5">Type</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(['Comics', 'Cards', 'Toys'] as Category[]).map((cat) => (
+                    <button
+                      key={cat}
+                      type="button"
+                      onClick={() => {
+                        setSnapCategory(cat);
+                        setSnapPrices({});
+                      }}
+                      className={`min-h-[44px] rounded-xl text-sm font-medium border cursor-pointer transition-colors ${
+                        snapCategory === cat
+                          ? 'bg-[#D4AF37] border-[#D4AF37] text-[#09090B] font-semibold'
+                          : 'bg-[#09090B] border-white/[0.1] text-[#A19D94] hover:text-[#F4F1EA]'
+                      }`}
+                    >
+                      {cat}
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label
+                  htmlFor="snap-title"
+                  className="block text-xs font-medium text-[#A19D94] mb-1.5"
+                >
+                  What is it? (from Lens, or type it yourself)
+                </label>
+                <input
+                  id="snap-title"
+                  type="text"
+                  value={snapTitle}
+                  onChange={(e) => setSnapTitle(e.target.value)}
+                  placeholder="e.g. Amazing Spider-Man #300, 1988"
+                  className="w-full min-h-[44px] px-3.5 rounded-xl bg-[#09090B] border border-white/[0.1] text-sm text-[#F4F1EA] placeholder:text-[#6E6A63] focus:outline-none focus:border-[#D4AF37]"
+                />
+              </div>
+
+              <div>
+                <div className="text-xs font-medium text-[#A19D94] mb-1.5">
+                  Step 2 — price it on each site
+                  {snapTitle.trim() ? ` for “${snapTitle.trim()}”` : ' — type the name above first'}
+                  :
+                </div>
+                <div className="divide-y divide-white/[0.06] rounded-xl bg-[#09090B] border border-white/[0.08] overflow-hidden">
+                  {MARKETPLACES_BY_CATEGORY[snapCategory].map((site) => (
+                    <div key={site.name} className="px-3.5 py-2.5 flex items-center gap-2">
+                      <span className="flex-1 text-sm font-medium text-[#F4F1EA] min-w-0 truncate">
+                        {site.name}
+                        {site.name === 'eBay Sold' && (
+                          <span className="text-[#8E8A81] font-normal"> — use this one most</span>
+                        )}
+                      </span>
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.01"
+                        value={snapPrices[site.name] ?? ''}
+                        onChange={(e) =>
+                          setSnapPrices((prev) => ({ ...prev, [site.name]: e.target.value }))
+                        }
+                        placeholder="$ ?"
+                        aria-label={`Sold price on ${site.name}`}
+                        className="w-24 min-h-[40px] px-2.5 rounded-lg bg-[#121216] border border-white/[0.1] font-mono text-sm text-[#F4F1EA] text-right focus:outline-none focus:border-[#D4AF37]"
+                      />
+                      <a
+                        href={site.buildUrl(snapTitle.trim())}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="min-h-[40px] px-3 py-2 rounded-lg bg-[#D4AF37] text-[#09090B] text-xs font-semibold flex items-center gap-1 whitespace-nowrap"
+                      >
+                        Check <ExternalLink className="w-3 h-3" />
+                      </a>
+                    </div>
+                  ))}
+                </div>
+                <p className="mt-1.5 text-[11px] text-[#8E8A81]">
+                  Tip: on eBay tap “Sold listings” — that is the real price. Ignore asking
+                  prices that never sold.
+                </p>
+              </div>
+
+              <div className="bg-[#18181E] border border-white/[0.08] rounded-xl px-3.5 py-3 text-sm leading-relaxed">
+                {snapSummary.count === 0 ? (
+                  <span className="text-[#A19D94]">
+                    No prices typed yet — tap a site above, check sold prices, type one in.
+                  </span>
+                ) : (
+                  <span>
+                    From{' '}
+                    <span className="font-semibold text-[#F4F1EA]">
+                      {snapSummary.count} {snapSummary.count === 1 ? 'site' : 'sites'}
+                    </span>
+                    : low{' '}
+                    <span className="font-semibold text-[#E5C158]">
+                      {formatCurrency(snapSummary.low)}
+                    </span>{' '}
+                    · high{' '}
+                    <span className="font-semibold text-[#E5C158]">
+                      {formatCurrency(snapSummary.high)}
+                    </span>{' '}
+                    · average{' '}
+                    <span className="font-semibold text-[#E5C158]">
+                      {formatCurrency(snapSummary.avg)}
+                    </span>{' '}
+                    — that average becomes your est. value when you save it.
+                  </span>
+                )}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <button
+                  type="button"
+                  onClick={() => saveSnapItem('keep')}
+                  className="min-h-[48px] px-4 rounded-xl bg-[#D4AF37] hover:bg-[#E5C158] text-[#09090B] text-sm font-semibold cursor-pointer transition-colors"
+                >
+                  📚 Put in my collection
+                </button>
+                <button
+                  type="button"
+                  onClick={() => saveSnapItem('sale')}
+                  className="min-h-[48px] px-4 rounded-xl bg-[#1C1912] hover:bg-[#262116] border border-[#D4AF37]/40 text-sm font-semibold text-[#F6E29D] cursor-pointer transition-colors"
+                >
+                  💰 List it for sale
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+
         {/* Controls Bar: Mobile/Desktop Tabs, Search, Status Filter, Backup/Export */}
         <section className="space-y-3">
           <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3">
@@ -1690,6 +2049,15 @@ export default function App() {
                       >
                         <Edit3 className="w-3.5 h-3.5" />
                         <span>Edit Item</span>
+                      </button>
+
+                      <button
+                        type="button"
+                        onClick={() => priceItem(item)}
+                        className="min-h-[40px] px-3 py-1.5 rounded-lg text-xs font-medium text-[#A19D94] hover:text-[#F4F1EA] hover:bg-white/[0.04] flex items-center gap-1.5 cursor-pointer transition-colors"
+                      >
+                        <span aria-hidden="true">📸</span>
+                        <span>Price</span>
                       </button>
 
                       {confirmDeleteId === item.id ? (
