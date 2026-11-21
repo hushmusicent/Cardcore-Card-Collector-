@@ -235,7 +235,10 @@ async function startServer() {
           const retryMsg = retryErr instanceof Error ? retryErr.message : '';
           const rateLimited =
             retryStatus === 429 || retryMsg.includes('RESOURCE_EXHAUSTED');
-          if (!rateLimited || attempt === 2) throw retryErr;
+          // A daily-quota 429 will not clear by waiting seconds — retrying
+          // just burns more checks. Only retry per-minute limits.
+          const dailyQuota = /per day|daily|day.*quota|quota.*day/i.test(retryMsg);
+          if (!rateLimited || dailyQuota || attempt === 2) throw retryErr;
           await new Promise((resolve) =>
             setTimeout(resolve, attempt === 0 ? 15000 : 30000),
           );
@@ -298,9 +301,11 @@ async function startServer() {
         return;
       }
       if (safeStatus === 429 || rawMessage.includes('RESOURCE_EXHAUSTED')) {
+        const dailyQuota = /per day|daily|day.*quota|quota.*day/i.test(rawMessage);
         res.status(429).json({
-          error:
-            'Gemini’s free price-check limit is reached right now — it retried twice already. Give it a few minutes and try once more; if it still fails later, the day’s free checks are used up and it works again tomorrow. You can still type the sold prices in below, or use Lens / CollX.',
+          error: dailyQuota
+            ? 'The day’s free price checks are used up — it works again tomorrow. You can still type the sold prices in below, or use Lens / CollX.'
+            : 'Gemini’s free price-check limit is reached right now — it retried already. Give it a few minutes and try once more. You can still type the sold prices in below, or use Lens / CollX.',
         });
         return;
       }

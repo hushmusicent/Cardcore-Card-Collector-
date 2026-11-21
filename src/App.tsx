@@ -70,7 +70,7 @@ interface MarketplaceLink {
 }
 
 const STORAGE_KEY = 'cardcore_collectors_vault_v1';
-const BUILD_VERSION = 'v2026.11.21.5';
+const BUILD_VERSION = 'v2026.11.21.6';
 
 const MARKETPLACES_BY_CATEGORY: Record<Category, MarketplaceLink[]> = {
   Comics: [
